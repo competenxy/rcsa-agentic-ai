@@ -144,11 +144,9 @@ def generate_controls(sentences: List[str], target_n: int):
     if not sentences:
         return pd.DataFrame()
 
-    prompt = (
-        f"Extract **at least {target_n} specific RCSA controls** from the following sentences.\n"
-        "Return a JSON array called controls, each element with keys: ControlID, ControlObjective, Type, TestingMethod, Frequency."\n"
-        "Type must be Preventive / Detective / Corrective. Frequency must be Monthly / Quarterly / Semi-Annual / Annual."
-    )
+        prompt = f"""Extract **at least {target_n} specific RCSA controls** from the following sentences.
+Return a JSON array called controls, each element with keys: ControlID, ControlObjective, Type, TestingMethod, Frequency.
+Type must be Preventive / Detective / Corrective. Frequency must be Monthly / Quarterly / Semi-Annual / Annual."""
     prompt += "\nSentences:\n" + "\n".join(sentences)
 
     raw = chat_json(prompt, max_tokens=min(4096, target_n * 60 + 300))
