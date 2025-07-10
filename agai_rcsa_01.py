@@ -1,189 +1,152 @@
-# RCSA Agentic AI – Streamlit App (JSON‑safe with OpenAI v1)
-# --------------------------------------------------------
-# Adds `response_format={"type": "json_object"}` so GPT **must** reply with
-# valid JSON; no more "OpenAI did not return valid JSON" errors.
-# ---------------------------------------------------------------------------
-# Two tabs:
-#   1. 🆕 Generate RCSA  – extract draft controls from policy / SOP
-#   2. 🛠️ Validate RCSA – clean & enrich an existing controls sheet
-#
-# Stateless: documents processed only in RAM; only keyword‑hit snippets reach OpenAI.
-
-# ---------- 1. Imports & constants ----------
+# RCSA Agentic AI – Streamlit App (v0.4)
+# -------------------------------------------------------------
+# Upgrades:
+# 1. Context window ±1 sentence so GPT sees enough detail.
+# 2. Prompts demand **specific** (quantified *or* explicitly textual) controls.
+# 3. Validation keeps row‑count (no merging/dropping) and flags vague items.
+# 4. Default target controls bumped to 30.
+# -------------------------------------------------------------
 import streamlit as st
 import pandas as pd
-import docx2txt, pdfplumber, re, json, os
+import docx2txt, pdfplumber, re, json
 from io import BytesIO
 from typing import List
+from openai import OpenAI
 
-from openai import OpenAI  # v1 SDK
-
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])  # single global client
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 SYSTEM_PROMPT = (
-    "You are a senior operational‑risk analyst. Use banking best‑practice to "
-    "draft or refine RCSA controls in clear verb‑object‑condition form and "
-    "classify Type, TestingMethod, and Frequency. Respond strictly in JSON."
+    "You are a senior operational‑risk analyst creating an RCSA. "
+    "For each control you draft or correct, ensure the ControlObjective is **specific**: "
+    "include either a numeric threshold *or* an explicitly described textual condition (e.g., 'obtain approval from approvers as per escalation matrix level‑3'). "
+    "Return answers strictly in JSON as per schema."
 )
 
-# 👉 keyword list can live in a JSON file; hard‑coded here for brevity
 KEYWORDS: List[str] = [
-    "Authorise", "Approve", "Limit", "Threshold", "Dual‑sign", "Maker", "Checker",
-    "Segregate", "Validate", "Mandatory", "Exception", "Reconcile", "Compare", "Audit‑log",
-    "Override", "Escalate", "Lock", "Cut‑off", "Timeout", "Alert", "Ageing", "Suspense",
-    "Access", "Role", "Privilege", "Password", "Token", "MFA", "Credential", "Entitlement",
-    "Change", "Release", "Deploy", "Patch", "Configuration", "Version", "Rollback",
-    "Backup", "Restore", "Fail‑over", "DR", "BIA", "Resilience", "RTO", "RPO",
-    "Incident", "Root‑cause", "RCA", "Report", "KCI", "KPI", "Breach", "Loss",
-    "Vendor", "Outsource", "Third‑party", "SLA", "Contract", "Due‑diligence", "Onboarding",
-    "Performance‑review", "Payment", "Disbursement", "Settlement", "Clearing", "Remittance",
-    "Payout", "Transfer", "Transaction‑limit", "Reconciliation", "Break", "Unmatched",
-    "Mismatch", "Exception‑ageing", "Write‑off", "Suspense‑clear",
+    "authorise", "approve", "limit", "threshold", "dual‑sign", "maker", "checker",
+    "segregate", "validate", "mandatory", "exception", "reconcile", "compare", "audit‑log",
+    "override", "escalate", "lock", "cut‑off", "timeout", "alert", "ageing", "suspense",
+    "access", "role", "privilege", "password", "token", "mfa", "credential", "entitlement",
+    "change", "release", "deploy", "patch", "configuration", "version", "rollback",
+    "backup", "restore", "fail‑over", "dr", "bia", "resilience", "rto", "rpo",
+    "incident", "root‑cause", "rca", "report", "kci", "kpi", "breach", "loss",
+    "vendor", "outsource", "third‑party", "sla", "contract", "due‑diligence", "onboarding",
+    "performance‑review", "payment", "disbursement", "settlement", "clearing", "remittance",
+    "payout", "transfer", "transaction‑limit", "reconciliation", "break", "unmatched",
+    "mismatch", "exception‑ageing", "write‑off", "suspense‑clear",
 ]
 
-# ---------- 2. Helper functions ----------
+# ---------- helper functions ----------
 
-def extract_text(uploaded_file) -> str:
-    """Return raw text from TXT / PDF / DOCX uploads without touching disk."""
-    if uploaded_file is None:
+def extract_text(upload):
+    if not upload:
         return ""
-
-    ftype = uploaded_file.type
-
-    if ftype == "text/plain":
-        return uploaded_file.read().decode("utf‑8", errors="ignore")
-
-    if ftype in [
+    kind = upload.type
+    if kind == "text/plain":
+        return upload.read().decode("utf‑8", errors="ignore")
+    if kind in [
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/msword",
     ]:
-        return docx2txt.process(uploaded_file)
-
-    if ftype == "application/pdf":
-        blocks = []
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                blocks.append(page.extract_text() or "")
-        return "\n".join(blocks)
-
-    st.warning(f"Unsupported file type: {ftype}")
+        return docx2txt.process(upload)
+    if kind == "application/pdf":
+        out = []
+        with pdfplumber.open(upload) as pdf:
+            for p in pdf.pages:
+                out.append(p.extract_text() or "")
+        return "\n".join(out)
+    st.warning(f"Unsupported type {kind}")
     return ""
 
 
-def find_sentences(text: str, keywords: List[str]) -> List[str]:
-    splitter = re.compile(r"[.!?]\s+")
-    sentences = splitter.split(text)
+def find_sentences(text: str, keywords: List[str], window: int = 1):
+    parts = re.split(r"[.!?]\s+", text)
     kws = [k.lower() for k in keywords]
-    return [s.strip() for s in sentences if any(k in s.lower() for k in kws)]
+    hits = []
+    for i, s in enumerate(parts):
+        if any(k in s.lower() for k in kws):
+            start = max(i - window, 0)
+            end = min(i + window + 1, len(parts))
+            hits.append(" ".join(parts[start:end]).strip())
+    return hits
 
 
-def openai_chat(user_content: str, model: str = "gpt-4o-mini") -> str:
-    """Call OpenAI with enforced JSON‑only response."""
+def chat_json(user_msg: str, model="gpt-4o-mini"):
     resp = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
+            {"role": "user", "content": user_msg},
         ],
         temperature=0.2,
         max_tokens=1024,
-        response_format={"type": "json_object"},  # 💡 guarantees JSON
+        response_format={"type": "json_object"},
     )
-    return resp.choices[0].message.content.strip()
+    return resp.choices[0].message.content
 
 
-def generate_controls(sentences: List[str], target_n: int) -> pd.DataFrame:
+def generate_controls(sentences: List[str], n: int):
     prompt = (
-        "Extract up to "
-        f"{target_n} RCSA controls from the sentences provided. "
-        "Return *only* a JSON object with a single key `controls` mapping to a list, "
-        "each item containing: ControlObjective, Type (Preventive/Detective/Corrective), "
-        "TestingMethod, Frequency."
-        "\n\nSentences:\n" + "\n".join(sentences)
+        f"Create **at least** {n} RCSA controls from the sentences below. "
+        "Each ControlObjective must be specific (numeric or explicit textual condition). "
+        "Schema: {\"controls\": [ {\"ControlObjective\": str, \"Type\": str, \"TestingMethod\": str, \"Frequency\": str} ]}. "
+        "Do not include any keys other than 'controls'.\n\nSentences:\n" + "\n".join(sentences)
     )
-    raw = openai_chat(prompt)
-    try:
-        data = json.loads(raw)
-        ctrls = data["controls"]
-    except (json.JSONDecodeError, KeyError):
-        st.error("OpenAI did not return the expected JSON structure. Please retry.")
-        return pd.DataFrame()
-
-    df = pd.json_normalize(ctrls)
-    df.insert(0, "Control ID", [f"CO‑{i:03d}" for i in range(1, len(df) + 1)])
+    data = json.loads(chat_json(prompt))
+    df = pd.json_normalize(data["controls"])
+    df.insert(0, "Control ID", [f"CO-{i+1:03d}" for i in range(len(df))])
     return df
 
 
-def validate_controls(raw_text: str) -> pd.DataFrame:
+def validate_controls(raw_text: str):
     prompt = (
-        "Clean, correct and complete each RCSA control below. "
-        "Respond with a JSON object having key `controls`. Each element must have: "
-        "OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency, OtherDetails."
-        f"\n\nControls text:\n{raw_text}"
+        "For each input control row, produce a JSON element with keys: "
+        "OldControlObjective, UpdatedControlObjective (specific), Type, TestingMethod, Frequency, OtherDetails. "
+        "Return **exactly the same number of elements** as in the input. If a row is vague, set UpdatedControlObjective='REVIEW_NEEDED'.\n\nInput:\n"
+        + raw_text
     )
-    raw = openai_chat(prompt)
-    try:
-        data = json.loads(raw)
-        ctrls = data["controls"]
-    except (json.JSONDecodeError, KeyError):
-        st.error("OpenAI did not return the expected JSON structure. Please retry.")
-        return pd.DataFrame()
-
-    df = pd.json_normalize(ctrls)
-    df.insert(0, "Control ID", [f"VC‑{i:03d}" for i in range(1, len(df) + 1)])
+    data = json.loads(chat_json(prompt))
+    df = pd.json_normalize(data["controls"])
+    df.insert(0, "Control ID", [f"VC-{i+1:03d}" for i in range(len(df))])
     return df
 
 
-def excel_download(df: pd.DataFrame, fname: str):
+def download_excel(df, name):
     buf = BytesIO()
     df.to_excel(buf, index=False)
-    st.download_button(
-        "Download Excel",
-        buf.getvalue(),
-        file_name=fname,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    st.download_button("📥 Download Excel", buf.getvalue(), file_name=name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# ---------- 3. Streamlit UI ----------
+# ---------- UI ----------
+
 st.set_page_config(page_title="RCSA Agentic AI", layout="wide")
 st.title("📋 RCSA Agentic AI")
 
-TAB_GEN, TAB_VAL = st.tabs(["🆕 Generate RCSA", "🛠️ Validate RCSA"])
+tab_gen, tab_val = st.tabs(["🆕 Generate RCSA", "🛠️ Validate RCSA"])
 
-with TAB_GEN:
-    st.subheader("1️⃣ Upload policy / SOP / manual")
-    policy_file = st.file_uploader("Choose DOCX / PDF / TXT", type=["docx", "pdf", "txt"])
-    target_n = st.number_input("Target number of controls", 1, 100, 10)
-
-    if st.button("Generate controls") and policy_file:
-        text = extract_text(policy_file)
-        hits = find_sentences(text, KEYWORDS)
-        if not hits:
-            st.warning("No keyword‑bearing sentences found.")
+with tab_gen:
+    st.header("Generate draft controls")
+    up = st.file_uploader("Policy / SOP (DOCX, PDF, TXT)", type=["docx", "pdf", "txt"])
+    tgt = st.number_input("Target controls", 1, 150, 30)
+    if st.button("Generate") and up:
+        txt = extract_text(up)
+        sents = find_sentences(txt, KEYWORDS)
+        if not sents:
+            st.warning("No keyword hits – try another document or update keywords.")
         else:
-            df_controls = generate_controls(hits, target_n)
-            st.dataframe(df_controls, use_container_width=True)
-            if not df_controls.empty:
-                excel_download(df_controls, "rcsa_controls.xlsx")
+            df = generate_controls(sents, tgt)
+            st.dataframe(df, use_container_width=True)
+            if not df.empty:
+                download_excel(df, "rcsa_controls.xlsx")
 
-with TAB_VAL:
-    st.subheader("1️⃣ Upload existing RCSA list (DOCX/PDF/TXT/CSV/XLSX)")
-    rcsa_file = st.file_uploader(
-        "Choose a file", type=["docx", "pdf", "txt", "csv", "xlsx"], key="val"
-    )
-
-    if st.button("Validate controls") and rcsa_file:
-        if rcsa_file.type in [
-            "text/csv",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        ]:
-            raw_text = rcsa_file.getvalue().decode("utf‑8", errors="ignore")
+with tab_val:
+    st.header("Validate / refine existing controls")
+    up2 = st.file_uploader("Controls sheet or text (DOCX/PDF/TXT/CSV/XLSX)", type=["docx", "pdf", "txt", "csv", "xlsx"], key="val")
+    if st.button("Validate") and up2:
+        if up2.type in ["text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
+            raw = up2.getvalue().decode("utf-8", errors="ignore")
         else:
-            raw_text = extract_text(rcsa_file)
-
-        df_valid = validate_controls(raw_text)
-        st.dataframe(df_valid, use_container_width=True)
-        if not df_valid.empty:
-            excel_download(df_valid, "validated_rcsa_controls.xlsx")
-
-# ---------- End of file ----------
+            raw = extract_text(up2)
+        dfv = validate_controls(raw)
+        st.dataframe(dfv, use_container_width=True)
+        if not dfv.empty:
+            download_excel(dfv, "validated_rcsa_controls.xlsx")
