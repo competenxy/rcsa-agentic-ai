@@ -197,3 +197,49 @@ def download_excel(df, name):
 # ---------- UI ----------
 
 st.set_page_config(page_title="RCSA Agentic AI", layout="wide")
+
+st.title("📋 RCSA Agentic AI")
+tabs = st.tabs(["🆕 Generate RCSA", "🛠️ Validate RCSA"])
+
+# --- Tab 1: Generate ---
+with tabs[0]:
+    st.subheader("Generate draft controls from a policy / procedure")
+    up1 = st.file_uploader("Upload policy / SOP (PDF, DOCX, TXT)")
+    tgt = st.number_input("Target number of controls", 5, 100, value=20)
+    if st.button("Generate controls", key="gen") and up1:
+        txt = extract_text(up1)
+        sents = find_sentences(txt, KEYWORDS, window=1)
+        if not sents:
+            st.warning("No keyword hits found – try another file or adjust keywords.")
+        else:
+            try:
+                df = generate_controls(sents, tgt)
+                st.dataframe(df, use_container_width=True)
+                download_excel(df, "rcsa_controls.xlsx")
+            except Exception as e:
+                st.error(f"Generation failed: {e}")
+
+# --- Tab 2: Validate ---
+with tabs[1]:
+    st.subheader("Validate / clean an existing RCSA control list")
+    up2 = st.file_uploader("Upload CSV or XLSX of controls", key="val")
+    if st.button("Validate controls", key="valbtn") and up2:
+        try:
+            if up2.type == "text/csv":
+                df_in = pd.read_csv(up2)
+            elif up2.type in [
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-excel",
+            ]:
+                df_in = pd.read_excel(up2)
+            else:
+                st.error("Unsupported file type")
+                df_in = None
+            if df_in is not None:
+                rows = len(df_in)
+                records_json = df_in.to_json(orient="records")
+                df_out = validate_controls(records_json, rows)
+                st.dataframe(df_out, use_container_width=True)
+                download_excel(df_out, "validated_controls.xlsx")
+        except Exception as e:
+            st.error(f"Validation failed: {e}")
