@@ -196,4 +196,4 @@ def download_excel(df, name):
 
 # ---------- UI ----------
 
-st.set_page
+st.set_page_config(page_title="RCSA Agentic AI", layout="wide")
