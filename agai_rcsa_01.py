@@ -213,10 +213,30 @@ with tab_val:
                 df_in = pd.read_csv(up2)
                 rows = len(df_in)
                 records_json = df_in.to_json(orient="records")
-            elif up2.type in [
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "application/vnd.ms-excel",
-            ]:
-                df_in = pd.read_excel(up2)
-                rows = len(df_in)
-                records_json = df_in.to_json
+            else:
+                txt = extract_text(up2)
+                lines = [l.strip() for l in txt.splitlines() if l.strip()]
+                rows = len(lines)
+                records_json = json.dumps([
+                    {
+                        "OldControlObjective": l,
+                        "UpdatedControlObjective": "",
+                        "Type": "",
+                        "TestingMethod": "",
+                        "Frequency": "",
+                        "OtherDetails": "",
+                    }
+                    for l in lines
+                ])
+            df_out = validate_controls(records_json, rows)
+            st.dataframe(df_out, use_container_width=True)
+            download_excel(df_out, "validated_controls.xlsx")
+        except Exception as e:
+            st.error(f"Validation failed: {e}")(df_out, "validated_controls.xlsx")
+        except Exception as e:
+            st.error(f"Validation failed: {e}")(records_json, rows)
+            st.dataframe(df_out, use_container_width=True)
+            if not df_out.empty:
+                download_excel(df_out, "validated_controls.xlsx")
+        except Exception as e:
+            st.error(f"Validation failed: {e}")
