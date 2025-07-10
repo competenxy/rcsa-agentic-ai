@@ -167,18 +167,37 @@ def generate_controls(sentences: List[str], n: int):
 
 
 def validate_controls(records_json: str, rows: int):
+    """Send existing controls to GPT for clean‑up, enforcing row‑parity.
+    Returns a normalised DataFrame.
+    """
     prompt = (
-        "You will receive a JSON array called input_records. "
-        "For each element, return an element with keys: OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency, OtherDetails. "
-        "Type must be Preventive/Detective/Corrective; Frequency must be Monthly/Quarterly/Semi-Annual/Annual. "
-        f"Return **exactly {rows} elements** in the same order; if a row is vague, set UpdatedControlObjective='REVIEW_NEEDED'.\n\n"
+        "You will receive a JSON array named input_records. "
+        "For every element, return **one** element with keys: OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency, OtherDetails. "
+        "Type must be Preventive / Detective / Corrective; Frequency must be Monthly / Quarterly / Semi-Annual / Annual. "
+        f"Return the result **as a JSON array with exactly {rows} elements** — do NOT wrap it in any additional object or key.
+
+"
         "input_records = " + records_json
     )
+
     mtok = min(4096, max(1024, rows * 60 + 200))
-    data = safe_load_json(chat_json(prompt, max_tokens=mtok))
+    raw = chat_json(prompt, max_tokens=mtok)
+    data = safe_load_json(raw)
+
+    # If GPT still wrapped the list, unwrap common wrappers
+    if isinstance(data, dict):
+        for k in ("output_records", "results", "records"):
+            if k in data and isinstance(data[k], list):
+                data = data[k]
+                break
+    if not isinstance(data, list):
+        raise ValueError("Validator response not a JSON array; please retry.")
+    if len(data) != rows:
+        raise ValueError(f"Row count mismatch: expected {rows}, got {len(data)} – retry.")
+
     df = pd.json_normalize(data)
     if df.empty:
-        raise ValueError("Validator returned empty – please retry.")
+        raise ValueError("Validator returned empty array – please retry.")
     df.insert(0, "Control ID", [f"VC-{i+1:03d}" for i in range(len(df))])
     df = _apply_normalisation(df)
     return df
