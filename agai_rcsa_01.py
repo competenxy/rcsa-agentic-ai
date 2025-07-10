@@ -141,13 +141,19 @@ def find_sentences(text: str, keywords: List[str], window: int = 1):
 
 
 def generate_controls(sentences: List[str], target_n: int):
+    """Call GPT to draft controls from extracted sentences."""
     if not sentences:
+        st.warning("No keyword‑matched sentences supplied.")
         return pd.DataFrame()
 
-        prompt = f"""Extract **at least {target_n} specific RCSA controls** from the following sentences.
-Return a JSON array called controls, each element with keys: ControlID, ControlObjective, Type, TestingMethod, Frequency.
-Type must be Preventive / Detective / Corrective. Frequency must be Monthly / Quarterly / Semi-Annual / Annual."""
-    prompt += "\nSentences:\n" + "\n".join(sentences)
+    prompt = f"""Extract **at least {target_n} specific RCSA controls** from the sentences below.
+Return a JSON array called `controls`, where each element has keys: ControlID, ControlObjective, Type, TestingMethod, Frequency.
+Type must be Preventive, Detective, or Corrective. Frequency must be Monthly, Quarterly, Semi‑Annual, or Annual."""
+
+    prompt += "
+Sentences:
+" + "
+".join(sentences)
 
     raw = chat_json(prompt, max_tokens=min(4096, target_n * 60 + 300))
     data = safe_json(raw)
@@ -157,6 +163,11 @@ Type must be Preventive / Detective / Corrective. Frequency must be Monthly / Qu
     if df.empty:
         st.error("GPT returned no controls; try increasing target or check policy text.")
         return df
+
+    # Normalise columns
+    df["Type"] = df["Type"].map(normalise_type)
+    df["Frequency"] = df["Frequency"].map(normalise_freq)
+    return df
 
     # Normalise
     df["Type"] = df["Type"].map(normalise_type)
