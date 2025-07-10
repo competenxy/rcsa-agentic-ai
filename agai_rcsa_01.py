@@ -240,24 +240,35 @@ with tabs[0]:
 # --- Tab 2: Validate ---
 with tabs[1]:
     st.subheader("Validate / clean an existing RCSA control list")
-    up2 = st.file_uploader("Upload CSV or XLSX of controls", key="val")
+    st.caption("Accepted: CSV, XLSX, DOCX, or PDF containing a table or one‑control‑per‑line list.")
+    up2 = st.file_uploader("Upload file with controls", type=["csv", "xlsx", "xls", "docx", "pdf"], key="val")
     if st.button("Validate controls", key="valbtn") and up2:
         try:
-            if up2.type == "text/csv":
+            df_in = None
+            if up2.name.lower().endswith(".csv"):
                 df_in = pd.read_csv(up2)
-            elif up2.type in [
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "application/vnd.ms-excel",
-            ]:
+            elif up2.name.lower().endswith((".xlsx", ".xls")):
                 df_in = pd.read_excel(up2)
+            elif up2.name.lower().endswith(".docx"):
+                txt = docx2txt.process(up2)
+                lines = [l.strip() for l in txt.splitlines() if l.strip()]
+                df_in = pd.DataFrame({"OldControlObjective": lines})
+            elif up2.name.lower().endswith(".pdf"):
+                txt = extract_text(up2)
+                lines = [l.strip() for l in txt.splitlines() if l.strip()]
+                df_in = pd.DataFrame({"OldControlObjective": lines})
             else:
                 st.error("Unsupported file type")
-                df_in = None
-            if df_in is not None:
+
+            if df_in is not None and not df_in.empty:
                 rows = len(df_in)
                 records_json = df_in.to_json(orient="records")
                 df_out = validate_controls(records_json, rows)
                 st.dataframe(df_out, use_container_width=True)
                 download_excel(df_out, "validated_controls.xlsx")
+            else:
+                st.warning("No usable rows found in the uploaded file.")
+        except Exception as e:
+            st.error(f"Validation failed: {e}")(df_out, "validated_controls.xlsx")
         except Exception as e:
             st.error(f"Validation failed: {e}")
