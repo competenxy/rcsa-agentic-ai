@@ -1,11 +1,9 @@
-# RCSA Agentic AI – Streamlit App (v0.7)
-# -------------------------------------------------------------
-# NEW BUSINESS RULES
-# • Type must be one of **P / D / C**  (Preventive, Detective, Corrective)
-# • Frequency must be one of **Monthly / Quarterly / Semi‑Annual / Annual**
-#   based on risk.  Any free‑text values returned by GPT are normalised.
-# • Validator still preserves row‑count and flags vague items.
-# -------------------------------------------------------------
+# RCSA Agentic AI – Streamlit App (v0.8)
+# ------------------------------------------------------------------
+# • Fixes SyntaxError (unterminated string) in validate_controls
+# • Accurate row‑count for CSV/XLSX via pandas; JSON array sent to GPT
+# • Validator prompt guarantees 1‑for‑1 rows, no shrinkage
+# ------------------------------------------------------------------
 
 import streamlit as st
 import pandas as pd
@@ -19,9 +17,9 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 SYSTEM_PROMPT = (
     "You are a senior operational‑risk analyst creating an RCSA. "
     "For each control you draft or correct, ensure: "
-    "1) ControlObjective is **specific** (numeric or explicit textual condition). "
-    "2) Type must be one of P (Preventive), D (Detective), or C (Corrective). "
-    "3) Frequency must be one of Monthly, Quarterly, Semi‑Annual, or Annual. "
+    "1) ControlObjective is specific (numeric or explicit textual condition). "
+    "2) Type must be P, D, or C. "
+    "3) Frequency must be Monthly, Quarterly, Semi‑Annual, or Annual. "
     "Return answers strictly in JSON as per schema."
 )
 
@@ -46,6 +44,9 @@ ALLOWED_FREQ = {
     "SEMI‑ANNUAL": "Semi-Annual",
     "SEMI ANNUAL": "Semi-Annual",
     "SEMIANNUAL": "Semi-Annual",
+    "BI-ANNUAL": "Semi-Annual",
+    "BI ANNUAL": "Semi-Annual",
+    "BIANNUAL": "Semi-Annual",
     "ANNUAL": "Annual",
 }
 
@@ -110,11 +111,10 @@ def safe_load_json(raw: str):
 
 def _norm_type(val: str):
     if not val:
-        return "P"  # default preventive
+        return "P"
     v = val.strip().upper()
     if v in ALLOWED_TYPES:
-        return v[0]  # P / D / C
-    # naive keyword mapping
+        return v[0]
     if "PREV" in v:
         return "P"
     if "DET" in v:
@@ -163,9 +163,7 @@ def validate_controls(records_json: str, rows: int):
         "You will receive a JSON array called input_records. "
         "For each element, return an element with keys: OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency, OtherDetails. "
         "Type must be P/D/C; Frequency must be Monthly/Quarterly/Semi-Annual/Annual. "
-        "Return **exactly " + str(rows) + " elements** in the same order; if a row is vague, set UpdatedControlObjective='REVIEW_NEEDED'.
-
-"
+        f"Return **exactly {rows} elements** in the same order; if a row is vague, set UpdatedControlObjective='REVIEW_NEEDED'.\n\n"
         "input_records = " + records_json
     )
     mtok = min(4096, max(1024, rows * 60 + 200))
@@ -210,16 +208,15 @@ with tab_val:
     st.header("Validate / refine existing controls")
     up2 = st.file_uploader("Controls sheet or text (DOCX/PDF/TXT/CSV/XLSX)", type=["docx", "pdf", "txt", "csv", "xlsx"], key="val")
     if st.button("Validate") and up2:
-        if up2.type in ["text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
-            raw = up2.getvalue().decode("utf-8", errors="ignore")
-            rows = raw.count("\n")
-        else:
-            raw = extract_text(up2)
-            rows = raw.count("\n")
         try:
-            dfv = validate_controls(raw, max(1, rows))
-            st.dataframe(dfv, use_container_width=True)
-            if not dfv.empty:
-                download_excel(dfv, "validated_rcsa_controls.xlsx")
-        except Exception as e:
-            st.error(f"Failed to parse JSON reply: {e}")
+            if up2.type == "text/csv":
+                df_in = pd.read_csv(up2)
+                rows = len(df_in)
+                records_json = df_in.to_json(orient="records")
+            elif up2.type in [
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-excel",
+            ]:
+                df_in = pd.read_excel(up2)
+                rows = len(df_in)
+                records_json = df_in.to_json
