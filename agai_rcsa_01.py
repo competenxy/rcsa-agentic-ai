@@ -1,277 +1,158 @@
-# RCSA Agentic AI – Streamlit App (v2.0)
-# -----------------------------------------------------------------------------
-# • COMPLETE rewrite after incremental patch‑chaos ‑> clean, validated code base
-# • Generator and Validator fully functional for CSV/XLSX/DOCX/PDF
-# • Robust JSON handling, row‑parity enforcement, normalisation helpers
-# • Clear error handling; no hidden NameErrors or indentation issues
-# -----------------------------------------------------------------------------
-
 import streamlit as st
 import pandas as pd
-import docx2txt, pdfplumber, re, json
+import json
+import re
 from io import BytesIO
-from typing import List, Dict, Any
 from openai import OpenAI
+import docx2txt
+import pdfplumber
 
-# ------------------------------ CONFIG ---------------------------------------
-
+# Initialize OpenAI client
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-SYSTEM_PROMPT = (
-    "You are a senior operational‑risk analyst creating an RCSA. "
-    "For each control you draft or correct, ensure: "
-    "1) ControlObjective is specific (numeric or explicit textual condition). "
-    "2) Type must be Preventive, Detective, or Corrective. "
-    "3) Frequency must be Monthly, Quarterly, Semi‑Annual, or Annual. "
-    "Return answers strictly in JSON as per schema."
-)
+# Text extraction function
+def extract_text(uploaded) -> str:
+    name = uploaded.name.lower()
+    if name.endswith('.docx'):
+        return docx2txt.process(uploaded)
+    if name.endswith('.pdf'):
+        with pdfplumber.open(uploaded) as pdf:
+            return "\n".join(page.extract_text() or "" for page in pdf.pages)
+    return uploaded.read().decode('utf-8', errors='ignore')
 
-KEYWORDS: List[str] = [
-    "authorise", "approve", "limit", "threshold", "dual‑sign", "maker", "checker",
-    "segregate", "validate", "mandatory", "exception", "reconcile", "compare", "audit‑log",
-    "override", "escalate", "lock", "cut‑off", "timeout", "alert", "ageing", "suspense",
-    "access", "role", "privilege", "password", "token", "mfa", "credential", "entitlement",
-    "change", "release", "deploy", "patch", "configuration", "version", "rollback",
-    "backup", "restore", "fail‑over", "dr", "bia", "resilience", "rto", "rpo",
-    "incident", "root‑cause", "rca", "report", "kci", "kpi", "breach", "loss",
-    "vendor", "outsource", "third‑party", "sla", "contract", "due‑diligence", "onboarding",
-    "performance‑review", "payment", "disbursement", "settlement", "clearing", "remittance",
-    "payout", "transfer", "transaction‑limit", "reconciliation", "break", "unmatched",
-    "mismatch", "exception‑ageing", "write‑off", "suspense‑clear",
-]
-
-type_map_full = {"PREVENTIVE": "Preventive", "DETECTIVE": "Detective", "CORRECTIVE": "Corrective"}
-type_map_letter = {"P": "Preventive", "D": "Detective", "C": "Corrective"}
-
-afreq: Dict[str, str] = {
-    "MONTHLY": "Monthly",
-    "QUARTERLY": "Quarterly",
-    "SEMI‑ANNUAL": "Semi-Annual",
-    "SEMI ANNUAL": "Semi-Annual",
-    "SEMIANNUAL": "Semi-Annual",
-    "BI‑ANNUAL": "Semi-Annual",
-    "BI ANNUAL": "Semi-Annual",
-    "BIANNUAL": "Semi-Annual",
-    "ANNUAL": "Annual",
-}
-
-# --------------------------- UTILITIES ---------------------------------------
-
-def normalise_type(raw: str) -> str:
-    if not raw:
-        return "REVIEW"
-    t = raw.strip().upper()
-    if t in type_map_full:
-        return type_map_full[t]
-    if t in type_map_letter:
-        return type_map_letter[t]
-    return "REVIEW"
-
-def normalise_freq(raw: str) -> str:
-    if not raw:
-        return "REVIEW"
-    f = raw.strip().upper().replace("-", " ")
-    return afreq.get(f, "REVIEW")
-
-# -----------------------------------------------------------------------------
-
-# --------------------------- FILE EXTRACTION ---------------------------------
-
-def extract_text(upload) -> str:
-    """Return plain text from upload (TXT/DOCX/PDF)."""
-    if upload.type == "text/plain":
-        return upload.read().decode("utf-8", errors="ignore")
-    if upload.type in [
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
-    ]:
-        return docx2txt.process(upload)
-    if upload.type == "application/pdf":
-        txt = []
-        with pdfplumber.open(upload) as pdf:
-            for p in pdf.pages:
-                txt.append(p.extract_text() or "")
-        return "\n".join(txt)
-    st.warning(f"Unsupported type {upload.type}")
-    return ""
-
-# -----------------------------------------------------------------------------
-
-# ------------------------------ GPT HELPERS ----------------------------------
-
-def chat_json(prompt: str, max_tokens: int = 2048, model: str = "gpt-4o-mini") -> Any:
+# GPT Chat helper
+def chat_json(prompt: str, max_tokens: int = 2048) -> dict:
     resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
+        model="gpt-4o",
         temperature=0.2,
         max_tokens=max_tokens,
         response_format={"type": "json_object"},
+        messages=[{"role": "system", "content": "You're a precise Operational Risk assistant for banks."},
+                  {"role": "user", "content": prompt}],
     )
-    return resp.choices[0].message.content
+    return json.loads(resp.choices[0].message.content)
 
+# Normalization helpers
+def norm_type(val: str) -> str:
+    return val.strip().capitalize()
 
-def safe_json(raw: str):
-    """Loads first JSON object / array from raw string."""
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        import re
+def norm_freq(val: str) -> str:
+    mapping = {'monthly':'Monthly','quarterly':'Quarterly','semi-annual':'Semi-Annual','annual':'Annual'}
+    val = val.strip().lower()
+    return mapping.get(val, val.capitalize())
 
-        m = re.search(r"\{.*\}|\[.*\]", raw, re.S)
-        if m:
-            return json.loads(m.group(0))
-        raise
-
-# -----------------------------------------------------------------------------
-
-# ------------------------------ GENERATOR ------------------------------------
-
-def find_sentences(text: str, keywords: List[str], window: int = 1):
-    parts = re.split(r"[.!?]\s+", text)
-    kws = [k.lower() for k in keywords]
-    hits = []
-    for i, s in enumerate(parts):
-        if any(k in s.lower() for k in kws):
-            start, end = max(i - window, 0), min(i + window + 1, len(parts))
-            hits.append(" ".join(parts[start:end]).strip())
-    return hits
-
-
-def generate_controls(sentences: List[str], target_n: int):
-    """Call GPT to draft controls from extracted sentences."""
+# Generate RCSA controls
+def generate_controls(text: str, target_n: int) -> pd.DataFrame:
+    keywords = ["approval","limit","threshold","reconcile","review","authorise",
+                "exception","segregation","dual","signoff","compliance","validate","checker"]
+    sentences = [s.strip() for s in re.split(r'[.!?\n]', text) if any(k in s.lower() for k in keywords) and len(s.strip()) > 20]
+    
     if not sentences:
-        st.warning("No keyword‑matched sentences supplied.")
+        st.warning("No control-like sentences found.")
         return pd.DataFrame()
 
-    prompt = f"""Extract **at least {target_n} specific RCSA controls** from the sentences below.
-Return a JSON array called `controls`, where each element has keys: ControlID, ControlObjective, Type, TestingMethod, Frequency.
-Type must be Preventive, Detective, or Corrective. Frequency must be Monthly, Quarterly, Semi‑Annual, or Annual."""
-
-    prompt += "
-Sentences:
-" + "
-".join(sentences)
-
-    raw = chat_json(prompt, max_tokens=min(4096, target_n * 60 + 300))
-    data = safe_json(raw)
-    if isinstance(data, dict):
-        data = data.get("controls", [])
-    df = pd.DataFrame(data)
-    if df.empty:
-        st.error("GPT returned no controls; try increasing target or check policy text.")
-        return df
-
-    # Normalise columns
-    df["Type"] = df["Type"].map(normalise_type)
-    df["Frequency"] = df["Frequency"].map(normalise_freq)
-    return df
-
-    # Normalise
-    df["Type"] = df["Type"].map(normalise_type)
-    df["Frequency"] = df["Frequency"].map(normalise_freq)
-    return df
-
-# ------------------------------ VALIDATOR ------------------------------------
-
-def validate_controls(records_json: str, rows: int):
     prompt = f"""
-You will receive a JSON array named input_records.
-For every element, return **one** element with keys: OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency, OtherDetails.
-Type must be Preventive / Detective / Corrective. Frequency must be Monthly / Quarterly / Semi-Annual / Annual.
-Return the result **as a JSON array with exactly {rows} elements** — do NOT wrap it in any additional object.
+    Extract exactly {target_n} highly specific, measurable RCSA controls using verb-object-condition from:
+
+    Sentences:
+    {sentences}
+
+    Controls must explicitly state measurable conditions (time-bound, numeric limits, approver roles).
+    Return a JSON array 'controls' with exact keys: ControlID, ControlObjective, Type (Preventive, Detective, Corrective), TestingMethod, Frequency (Monthly, Quarterly, Semi-Annual, Annual).
     """
-    user_json_block = "input_records = " + records_json
-    raw = chat_json(prompt + "\n" + user_json_block, max_tokens=min(4096, rows * 60 + 300))
-    data = safe_json(raw)
-    if not isinstance(data, list):
-        raise ValueError("Validator response not a JSON array; please retry.")
-    if len(data) != rows:
-        raise ValueError(f"Validator returned {len(data)} rows but expected {rows}.")
+    
+    data = chat_json(prompt)
+    controls = data.get('controls', [])
 
-    df = pd.DataFrame(data)
-    df["Type"] = df["Type"].map(normalise_type)
-    df["Frequency"] = df["Frequency"].map(normalise_freq)
-    return df
+    for idx, ctrl in enumerate(controls, 1):
+        ctrl['ControlID'] = ctrl.get('ControlID', f'GC-{idx:03d}')
+        ctrl['Type'] = norm_type(ctrl['Type'])
+        ctrl['Frequency'] = norm_freq(ctrl['Frequency'])
 
-# ------------------------------ DOWNLOAD -------------------------------------
+    return pd.DataFrame(controls)
 
+# Validate existing RCSA controls
+def validate_controls(raw_text: str) -> pd.DataFrame:
+    lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+
+    prompt = f"""
+    Rewrite these RCSA controls explicitly in measurable verb-object-condition format, discarding vague ones:
+
+    {lines}
+
+    Classify clearly:
+    - Type: Preventive, Detective, Corrective
+    - TestingMethod (measurable)
+    - Frequency: Monthly, Quarterly, Semi-Annual, Annual
+
+    Return JSON array 'controls' exactly containing keys:
+    OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency.
+    Maintain original order without dropping controls.
+    """
+
+    data = chat_json(prompt)
+    controls = data.get('controls', [])
+
+    validated = []
+    for i, ctrl in enumerate(controls):
+        validated.append({
+            "ControlID": f"VC-{i+1:03d}",
+            "OldControlObjective": ctrl['OldControlObjective'],
+            "UpdatedControlObjective": ctrl['UpdatedControlObjective'],
+            "Type": norm_type(ctrl['Type']),
+            "TestingMethod": ctrl['TestingMethod'],
+            "Frequency": norm_freq(ctrl['Frequency']),
+        })
+
+    return pd.DataFrame(validated)
+
+# Download to Excel helper
 def download_excel(df: pd.DataFrame, fname: str):
-    buf = BytesIO()
-    df.to_excel(buf, index=False)
-    st.download_button("📥 Download Excel", data=buf.getvalue(), file_name=fname)
+    buffer = BytesIO()
+    df.to_excel(buffer, index=False)
+    st.download_button("📥 Download Excel", buffer.getvalue(), file_name=fname,
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# ------------------------------ STREAMLIT UI ---------------------------------
-
+# Streamlit UI
 st.set_page_config(page_title="RCSA Agentic AI", layout="wide")
-
 st.title("📋 RCSA Agentic AI")
 
-tabs = st.tabs(["🆕 Generate RCSA", "🛠️ Validate RCSA"])
+# Tabs
+new_tab, validate_tab = st.tabs(["🆕 Generate New Controls", "🛠️ Validate Controls"])
 
-# --- GENERATE ----------------------------------------------------------------
-with tabs[0]:
-    st.subheader("Generate draft controls from a policy / procedure")
-    up1 = st.file_uploader("Upload policy / SOP (PDF, DOCX, TXT)")
-    target_n = st.number_input("Target number of controls", min_value=1, max_value=100, value=20)
+with new_tab:
+    st.subheader("Generate RCSA Controls")
+    uploaded = st.file_uploader("Upload document (PDF, DOCX, TXT)", type=["pdf","docx","txt"])
+    target_controls = st.number_input("Target Number of Controls", min_value=1, max_value=100, value=10)
 
-    if st.button("Generate controls"):
-        if not up1:
-            st.warning("Please upload a file first.")
+    if st.button("Generate"):
+        if not uploaded:
+            st.warning("Please upload a document.")
         else:
-            txt = extract_text(up1)
-            sents = find_sentences(txt, KEYWORDS, window=1)
-            if not sents:
-                st.warning("No keyword hits found – try another file or adjust keywords.")
+            text = extract_text(uploaded)
+            df_generated = generate_controls(text, target_controls)
+            if not df_generated.empty:
+                st.dataframe(df_generated, use_container_width=True)
+                download_excel(df_generated, "generated_controls.xlsx")
+
+with validate_tab:
+    st.subheader("Validate Existing RCSA Controls")
+    uploaded_existing = st.file_uploader("Upload RCSA controls (DOCX, PDF, TXT, CSV, XLSX)", type=["docx","pdf","txt","csv","xlsx"])
+
+    if st.button("Validate"):
+        if not uploaded_existing:
+            st.warning("Please upload a file.")
+        else:
+            file_name = uploaded_existing.name.lower()
+            df_existing = pd.read_csv(uploaded_existing) if file_name.endswith('.csv') else pd.read_excel(uploaded_existing) if file_name.endswith(('.xlsx','.xls')) else None
+            
+            if df_existing is not None:
+                col = next((c for c in ['ControlObjective', 'Control Objective'] if c in df_existing.columns), df_existing.columns[1])
+                raw_text = "\n".join(df_existing[col].astype(str).tolist())
             else:
-                with st.spinner("Calling GPT…"):
-                    df_out = generate_controls(sents, target_n)
-                if not df_out.empty:
-                    st.dataframe(df_out, use_container_width=True)
-                    download_excel(df_out, "rcsa_generated.xlsx")
+                raw_text = extract_text(uploaded_existing)
 
-# --- VALIDATE ----------------------------------------------------------------
-with tabs[1]:
-    st.subheader("Validate / clean an existing RCSA control list")
-    st.caption("Accepted: CSV, XLSX, DOCX, or PDF containing a table or one‑control‑per‑line list.")
-    up2 = st.file_uploader("Upload file with controls", type=["csv", "xlsx", "xls", "docx", "pdf"], key="val")
-
-    if st.button("Validate controls", key="valbtn"):
-        if not up2:
-            st.warning("Upload a control list first.")
-        else:
-            try:
-                # Convert upload to DataFrame with OldControlObjective at minimum
-                df_in = None
-                lname = up2.name.lower()
-                if lname.endswith(".csv"):
-                    df_in = pd.read_csv(up2)
-                elif lname.endswith((".xlsx", ".xls")):
-                    df_in = pd.read_excel(up2)
-                elif lname.endswith(".docx"):
-                    txt = docx2txt.process(up2)
-                    lines = [l.strip() for l in txt.splitlines() if l.strip()]
-                    df_in = pd.DataFrame({"OldControlObjective": lines})
-                elif lname.endswith(".pdf"):
-                    txt = extract_text(up2)
-                    lines = [l.strip() for l in txt.splitlines() if l.strip()]
-                    df_in = pd.DataFrame({"OldControlObjective": lines})
-
-                if df_in is None or df_in.empty:
-                    st.error("No usable rows found in the uploaded file.")
-                    st.stop()
-
-                rows = len(df_in)
-                records_json = df_in.to_json(orient="records")
-
-                with st.spinner("Calling GPT…"):
-                    df_out = validate_controls(records_json, rows)
-
-                st.dataframe(df_out, use_container_width=True)
-                download_excel(df_out, "rcsa_validated.xlsx")
-            except Exception as e:
-                st.error(f"Validation failed: {e}")
-
-# -----------------------------------------------------------------------------
+            df_validated = validate_controls(raw_text)
+            if not df_validated.empty:
+                st.dataframe(df_validated, use_container_width=True)
+                download_excel(df_validated, "validated_controls.xlsx")
