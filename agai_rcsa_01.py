@@ -1,4 +1,4 @@
-# RCSA Agentic AI – Streamlit App (v0.6)
+# RCSA Agentic AI – Streamlit App (v0.7)
 # -------------------------------------------------------------
 # NEW BUSINESS RULES
 # • Type must be one of **P / D / C**  (Preventive, Detective, Corrective)
@@ -158,17 +158,19 @@ def generate_controls(sentences: List[str], n: int):
     return df
 
 
-def validate_controls(raw_text: str, rows: int):
+def validate_controls(records_json: str, rows: int):
     prompt = (
-        "For each input control row, produce a JSON element with keys: "
-        "OldControlObjective, UpdatedControlObjective (specific), Type, TestingMethod, Frequency, OtherDetails. "
-        "Type must be P / D / C; Frequency must be Monthly / Quarterly / Semi-Annual / Annual. "
-        "Return **exactly the same number of elements** as in the input. If a row is vague, set UpdatedControlObjective='REVIEW_NEEDED'.\n\nInput:\n"
-        + raw_text
+        "You will receive a JSON array called input_records. "
+        "For each element, return an element with keys: OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency, OtherDetails. "
+        "Type must be P/D/C; Frequency must be Monthly/Quarterly/Semi-Annual/Annual. "
+        "Return **exactly " + str(rows) + " elements** in the same order; if a row is vague, set UpdatedControlObjective='REVIEW_NEEDED'.
+
+"
+        "input_records = " + records_json
     )
     mtok = min(4096, max(1024, rows * 60 + 200))
     data = safe_load_json(chat_json(prompt, max_tokens=mtok))
-    df = pd.json_normalize(data["controls"])
+    df = pd.json_normalize(data)
     df.insert(0, "Control ID", [f"VC-{i+1:03d}" for i in range(len(df))])
     df = _apply_normalisation(df)
     return df
