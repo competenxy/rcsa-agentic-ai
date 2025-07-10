@@ -170,15 +170,14 @@ def validate_controls(records_json: str, rows: int):
     """Send existing controls to GPT for clean‑up, enforcing row‑parity.
     Returns a normalised DataFrame.
     """
-    prompt = (
-        "You will receive a JSON array named input_records. "
-        "For every element, return **one** element with keys: OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency, OtherDetails. "
-        "Type must be Preventive / Detective / Corrective; Frequency must be Monthly / Quarterly / Semi-Annual / Annual. "
-        f"Return the result **as a JSON array with exactly {rows} elements** — do NOT wrap it in any additional object or key.
+    prompt = f"""
+You will receive a JSON array named `input_records`.
+For every element, return **one** element with keys: OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency, OtherDetails.
+Type must be Preventive / Detective / Corrective; Frequency must be Monthly / Quarterly / Semi-Annual / Annual.
+Return the result **as a JSON array with exactly {rows} elements** — do NOT wrap it in any additional object or key.
 
-"
-        "input_records = " + records_json
-    )
+input_records = {records_json}
+"""
 
     mtok = min(4096, max(1024, rows * 60 + 200))
     raw = chat_json(prompt, max_tokens=mtok)
