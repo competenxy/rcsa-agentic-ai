@@ -1,8 +1,10 @@
-# RCSA Agentic AI – Streamlit App (v0.8)
+# RCSA Agentic AI – Streamlit App (v1.1)
 # ------------------------------------------------------------------
-# • Fixes SyntaxError (unterminated string) in validate_controls
-# • Accurate row‑count for CSV/XLSX via pandas; JSON array sent to GPT
-# • Validator prompt guarantees 1‑for‑1 rows, no shrinkage
+# • Type column now spelled out **Preventive / Detective / Corrective**
+#   everywhere (generation + validation + normaliser).
+# • Prompt texts updated so GPT always returns full words, not letters.
+# • Normaliser maps P/D/C → full word for backward compatibility.
+# • Basic guard: if validator response is empty, show error instead of null.
 # ------------------------------------------------------------------
 
 import streamlit as st
@@ -18,7 +20,7 @@ SYSTEM_PROMPT = (
     "You are a senior operational‑risk analyst creating an RCSA. "
     "For each control you draft or correct, ensure: "
     "1) ControlObjective is specific (numeric or explicit textual condition). "
-    "2) Type must be P, D, or C. "
+    "2) Type must be Preventive, Detective, or Corrective. "
     "3) Frequency must be Monthly, Quarterly, Semi‑Annual, or Annual. "
     "Return answers strictly in JSON as per schema."
 )
@@ -37,7 +39,8 @@ KEYWORDS: List[str] = [
     "mismatch", "exception‑ageing", "write‑off", "suspense‑clear",
 ]
 
-ALLOWED_TYPES = {"P", "D", "C", "PREVENTIVE", "DETECTIVE", "CORRECTIVE"}
+ALLOWED_TYPES_FULL = {"PREVENTIVE": "Preventive", "DETECTIVE": "Detective", "CORRECTIVE": "Corrective"}
+ALLOWED_TYPE_LETTERS = {"P": "Preventive", "D": "Detective", "C": "Corrective"}
 ALLOWED_FREQ = {
     "MONTHLY": "Monthly",
     "QUARTERLY": "Quarterly",
@@ -111,17 +114,19 @@ def safe_load_json(raw: str):
 
 def _norm_type(val: str):
     if not val:
-        return "P"
+        return "Preventive"
     v = val.strip().upper()
-    if v in ALLOWED_TYPES:
-        return v[0]
+    if v in ALLOWED_TYPES_FULL:
+        return ALLOWED_TYPES_FULL[v]
+    if v in ALLOWED_TYPE_LETTERS:
+        return ALLOWED_TYPE_LETTERS[v]
     if "PREV" in v:
-        return "P"
+        return "Preventive"
     if "DET" in v:
-        return "D"
+        return "Detective"
     if "COR" in v:
-        return "C"
-    return "P"
+        return "Corrective"
+    return "Preventive"
 
 
 def _norm_freq(val: str):
@@ -146,13 +151,16 @@ def generate_controls(sentences: List[str], n: int):
     prompt = (
         f"Create **at least** {n} RCSA controls from the sentences below. "
         "Each ControlObjective must be specific (numeric or explicit textual condition). "
-        "Use exactly these choices: Type → P / D / C; Frequency → Monthly / Quarterly / Semi-Annual / Annual. "
+        "Use exactly these choices: Type → Preventive / Detective / Corrective; "
+        "Frequency → Monthly / Quarterly / Semi-Annual / Annual. "
         "Schema: {\"controls\": [ {\"ControlObjective\": str, \"Type\": str, \"TestingMethod\": str, \"Frequency\": str} ]}. "
         "Do not include any keys other than 'controls'.\n\nSentences:\n" + "\n".join(sentences)
     )
     mtok = min(4096, max(1024, n * 60 + 200))
     data = safe_load_json(chat_json(prompt, max_tokens=mtok))
-    df = pd.json_normalize(data["controls"])
+    df = pd.json_normalize(data.get("controls", []))
+    if df.empty:
+        raise ValueError("GPT returned no controls – try lowering target or check document.")
     df.insert(0, "Control ID", [f"CO-{i+1:03d}" for i in range(len(df))])
     df = _apply_normalisation(df)
     return df
@@ -162,13 +170,15 @@ def validate_controls(records_json: str, rows: int):
     prompt = (
         "You will receive a JSON array called input_records. "
         "For each element, return an element with keys: OldControlObjective, UpdatedControlObjective, Type, TestingMethod, Frequency, OtherDetails. "
-        "Type must be P/D/C; Frequency must be Monthly/Quarterly/Semi-Annual/Annual. "
+        "Type must be Preventive/Detective/Corrective; Frequency must be Monthly/Quarterly/Semi-Annual/Annual. "
         f"Return **exactly {rows} elements** in the same order; if a row is vague, set UpdatedControlObjective='REVIEW_NEEDED'.\n\n"
         "input_records = " + records_json
     )
     mtok = min(4096, max(1024, rows * 60 + 200))
     data = safe_load_json(chat_json(prompt, max_tokens=mtok))
     df = pd.json_normalize(data)
+    if df.empty:
+        raise ValueError("Validator returned empty – please retry.")
     df.insert(0, "Control ID", [f"VC-{i+1:03d}" for i in range(len(df))])
     df = _apply_normalisation(df)
     return df
@@ -177,66 +187,13 @@ def validate_controls(records_json: str, rows: int):
 def download_excel(df, name):
     buf = BytesIO()
     df.to_excel(buf, index=False)
-    st.download_button("📥 Download Excel", buf.getvalue(), file_name=name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "📥 Download Excel",
+        buf.getvalue(),
+        file_name=name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 # ---------- UI ----------
 
-st.set_page_config(page_title="RCSA Agentic AI", layout="wide")
-st.title("📋 RCSA Agentic AI")
-
-tab_gen, tab_val = st.tabs(["🆕 Generate RCSA", "🛠️ Validate RCSA"])
-
-with tab_gen:
-    st.header("Generate draft controls")
-    up = st.file_uploader("Policy / SOP (DOCX, PDF, TXT)", type=["docx", "pdf", "txt"])
-    tgt = st.number_input("Target controls", 1, 150, 20)
-    if st.button("Generate") and up:
-        txt = extract_text(up)
-        sents = find_sentences(txt, KEYWORDS)
-        if not sents:
-            st.warning("No keyword hits – try another document or update keywords.")
-        else:
-            try:
-                df = generate_controls(sents, tgt)
-                st.dataframe(df, use_container_width=True)
-                if not df.empty:
-                    download_excel(df, "rcsa_controls.xlsx")
-            except Exception as e:
-                st.error(f"Failed to parse JSON reply: {e}")
-
-with tab_val:
-    st.header("Validate / refine existing controls")
-    up2 = st.file_uploader("Controls sheet or text (DOCX/PDF/TXT/CSV/XLSX)", type=["docx", "pdf", "txt", "csv", "xlsx"], key="val")
-    if st.button("Validate") and up2:
-        try:
-            if up2.type == "text/csv":
-                df_in = pd.read_csv(up2)
-                rows = len(df_in)
-                records_json = df_in.to_json(orient="records")
-            else:
-                txt = extract_text(up2)
-                lines = [l.strip() for l in txt.splitlines() if l.strip()]
-                rows = len(lines)
-                records_json = json.dumps([
-                    {
-                        "OldControlObjective": l,
-                        "UpdatedControlObjective": "",
-                        "Type": "",
-                        "TestingMethod": "",
-                        "Frequency": "",
-                        "OtherDetails": "",
-                    }
-                    for l in lines
-                ])
-            df_out = validate_controls(records_json, rows)
-            st.dataframe(df_out, use_container_width=True)
-            download_excel(df_out, "validated_controls.xlsx")
-        except Exception as e:
-            st.error(f"Validation failed: {e}")(df_out, "validated_controls.xlsx")
-        except Exception as e:
-            st.error(f"Validation failed: {e}")(records_json, rows)
-            st.dataframe(df_out, use_container_width=True)
-            if not df_out.empty:
-                download_excel(df_out, "validated_controls.xlsx")
-        except Exception as e:
-            st.error(f"Validation failed: {e}")
+st.set_page
