@@ -1,13 +1,10 @@
-# RCSA Agentic AI – Streamlit App (v0.5)
+# RCSA Agentic AI – Streamlit App (v0.6)
 # -------------------------------------------------------------
-# Fixes JSONDecodeError when GPT reply is truncated or wrapped.
-# Changes:
-# 1.  Dynamic max_tokens based on requested control count (n * 60 + 200),
-#     capped at 4096.
-# 2.  Robust JSON parsing fallback: if first json.loads fails, regex‑extract
-#     the first {...} block.
-# 3.  Default target controls set to 20 (you can raise it if the doc is big).
-# 4.  Prompts unchanged – still demand specific numeric/textual controls.
+# NEW BUSINESS RULES
+# • Type must be one of **P / D / C**  (Preventive, Detective, Corrective)
+# • Frequency must be one of **Monthly / Quarterly / Semi‑Annual / Annual**
+#   based on risk.  Any free‑text values returned by GPT are normalised.
+# • Validator still preserves row‑count and flags vague items.
 # -------------------------------------------------------------
 
 import streamlit as st
@@ -21,8 +18,10 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 SYSTEM_PROMPT = (
     "You are a senior operational‑risk analyst creating an RCSA. "
-    "For each control you draft or correct, ensure the ControlObjective is **specific**: "
-    "include either a numeric threshold *or* an explicitly described textual condition (e.g., 'obtain approval from approvers as per escalation matrix level‑3'). "
+    "For each control you draft or correct, ensure: "
+    "1) ControlObjective is **specific** (numeric or explicit textual condition). "
+    "2) Type must be one of P (Preventive), D (Detective), or C (Corrective). "
+    "3) Frequency must be one of Monthly, Quarterly, Semi‑Annual, or Annual. "
     "Return answers strictly in JSON as per schema."
 )
 
@@ -39,6 +38,16 @@ KEYWORDS: List[str] = [
     "payout", "transfer", "transaction‑limit", "reconciliation", "break", "unmatched",
     "mismatch", "exception‑ageing", "write‑off", "suspense‑clear",
 ]
+
+ALLOWED_TYPES = {"P", "D", "C", "PREVENTIVE", "DETECTIVE", "CORRECTIVE"}
+ALLOWED_FREQ = {
+    "MONTHLY": "Monthly",
+    "QUARTERLY": "Quarterly",
+    "SEMI‑ANNUAL": "Semi-Annual",
+    "SEMI ANNUAL": "Semi-Annual",
+    "SEMIANNUAL": "Semi-Annual",
+    "ANNUAL": "Annual",
+}
 
 # ---------- helper functions ----------
 
@@ -96,13 +105,48 @@ def safe_load_json(raw: str):
         m = re.search(r"\{.*\}", raw, re.S)
         if m:
             return json.loads(m.group(0))
-        raise  # re‑raise for Streamlit to show traceback
+        raise
+
+
+def _norm_type(val: str):
+    if not val:
+        return "P"  # default preventive
+    v = val.strip().upper()
+    if v in ALLOWED_TYPES:
+        return v[0]  # P / D / C
+    # naive keyword mapping
+    if "PREV" in v:
+        return "P"
+    if "DET" in v:
+        return "D"
+    if "COR" in v:
+        return "C"
+    return "P"
+
+
+def _norm_freq(val: str):
+    if not val:
+        return "Annual"
+    v = val.strip().upper().replace("-", " ")
+    for k, std in ALLOWED_FREQ.items():
+        if k in v:
+            return std
+    return "Annual"
+
+
+def _apply_normalisation(df: pd.DataFrame):
+    if "Type" in df.columns:
+        df["Type"] = df["Type"].apply(_norm_type)
+    if "Frequency" in df.columns:
+        df["Frequency"] = df["Frequency"].apply(_norm_freq)
+    return df
 
 
 def generate_controls(sentences: List[str], n: int):
     prompt = (
         f"Create **at least** {n} RCSA controls from the sentences below. "
         "Each ControlObjective must be specific (numeric or explicit textual condition). "
+        "Use exactly these choices: Type → P / D / C; Frequency → Monthly / Quarterly / Semi-Annual / Annual. "
         "Schema: {\"controls\": [ {\"ControlObjective\": str, \"Type\": str, \"TestingMethod\": str, \"Frequency\": str} ]}. "
         "Do not include any keys other than 'controls'.\n\nSentences:\n" + "\n".join(sentences)
     )
@@ -110,6 +154,7 @@ def generate_controls(sentences: List[str], n: int):
     data = safe_load_json(chat_json(prompt, max_tokens=mtok))
     df = pd.json_normalize(data["controls"])
     df.insert(0, "Control ID", [f"CO-{i+1:03d}" for i in range(len(df))])
+    df = _apply_normalisation(df)
     return df
 
 
@@ -117,6 +162,7 @@ def validate_controls(raw_text: str, rows: int):
     prompt = (
         "For each input control row, produce a JSON element with keys: "
         "OldControlObjective, UpdatedControlObjective (specific), Type, TestingMethod, Frequency, OtherDetails. "
+        "Type must be P / D / C; Frequency must be Monthly / Quarterly / Semi-Annual / Annual. "
         "Return **exactly the same number of elements** as in the input. If a row is vague, set UpdatedControlObjective='REVIEW_NEEDED'.\n\nInput:\n"
         + raw_text
     )
@@ -124,6 +170,7 @@ def validate_controls(raw_text: str, rows: int):
     data = safe_load_json(chat_json(prompt, max_tokens=mtok))
     df = pd.json_normalize(data["controls"])
     df.insert(0, "Control ID", [f"VC-{i+1:03d}" for i in range(len(df))])
+    df = _apply_normalisation(df)
     return df
 
 
